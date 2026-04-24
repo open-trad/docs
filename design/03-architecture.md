@@ -360,6 +360,14 @@ class CCManager {
 
 ### 4.2 Stream Parser（`packages/stream-parser`）
 
+> **NOTE（2026-04-24 勘误）**：本节中 CC stream-json 事件的 TypeScript interface 字段名为示意性 camelCase。实际 CC 输出的 JSON 字段为 snake_case（如 `session_id`、`api_key_source`、`claude_code_version`）。施工时 `@opentrad/shared` 按"两层类型"实现：
+>
+> - `src/types/wire/` 保留 CC 原始 snake_case 字段（配 zod schema 做 runtime 校验）
+> - `src/types/`（domain 层）全部 camelCase，供 OpenTrad 内部所有包使用
+> - `packages/stream-parser` 的 normalize 函数负责 wire → domain 显式映射
+>
+> 本文档后续示例字段名不再逐一校订，以 `@opentrad/shared` 实际 schema 为准。发现时机：Issue #4 (stream-parser) 开工抓真实 CC 样本时。
+
 核心职责：把 NDJSON 字符串流转换成 typed `CCEvent`。
 
 ```typescript
