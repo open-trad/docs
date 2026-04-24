@@ -373,15 +373,61 @@ class CCManager {
 ```typescript
 // packages/stream-parser/src/types.ts
 
-// CC stream-json 事件的 discriminated union
+// CC stream-json 事件的 discriminated union（domain 层，扁平化后）
+// 注：wire 层保留 CC 原始的 message/content[] 嵌套结构，见 Issue #3 实现
 type CCEvent =
   | { type: 'system'; subtype: 'init'; data: SystemInitData }
-  | { type: 'assistant'; content: AssistantContent }
-  | { type: 'tool_use'; toolUseId: string; name: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; content: unknown; isError?: boolean }
+  | AssistantTextEvent
+  | AssistantThinkingEvent
+  | ToolUseEvent
+  | ToolResultEvent
   | { type: 'result'; subtype: 'success' | 'error'; data: ResultData }
   | { type: 'rate_limit_event'; rateLimitInfo: RateLimitInfo }
-  | { type: 'unknown'; raw: unknown };  // 未知事件作为 unknown 保留，不丢弃
+  | { type: 'unknown'; raw: unknown };
+
+// 共享的 per-event metadata（assistant 家族事件都带）
+interface MessageEventBase {
+  msgId: string;              // 同一 wire assistant message 的多个 block 共享
+  sessionId: string;
+  uuid: string;               // 每个 wire event 唯一
+  seq: number;                // 同 msgId 内 content block 顺序
+  isLast: boolean;            // true 时 messageMeta 非空，标志 message 结束
+  messageMeta?: {             // 仅 isLast=true 事件携带
+    model: string;
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheCreationInputTokens?: number;
+      cacheReadInputTokens?: number;
+    };
+    stopReason: string | null;
+  };
+}
+
+interface AssistantTextEvent extends MessageEventBase {
+  type: 'assistant_text';
+  text: string;
+}
+
+interface AssistantThinkingEvent extends MessageEventBase {
+  type: 'assistant_thinking';
+  thinking: string;
+  signature: string;          // Anthropic 要求保留，后续 tool call 鉴权用
+}
+
+interface ToolUseEvent extends MessageEventBase {
+  type: 'tool_use';
+  toolUseId: string;
+  name: string;
+  input: unknown;
+}
+
+interface ToolResultEvent extends MessageEventBase {
+  type: 'tool_result';
+  toolUseId: string;
+  content: unknown;
+  isError?: boolean;
+}
 
 interface SystemInitData {
   sessionId: string;
@@ -390,13 +436,20 @@ interface SystemInitData {
   model: string;
   permissionMode: string;
   claudeCodeVersion: string;
-  apiKeySource: 'subscription' | 'api_key' | 'bedrock' | 'vertex';
+  apiKeySource: 'subscription' | 'api_key' | 'bedrock' | 'vertex' | 'none';
 }
+```
 
-type AssistantContent =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string };
+**设计说明**：
+- CC 的 wire assistant event 是 `{ message: { content: [block, block, ...] } }` 嵌套结构。一个 wire event 可能包含多个 block（thinking + text + tool_use 并存）。
+- Parser 的 `normalize` 函数把 1 个 wire assistant event 展开成 N 个 domain 事件（1→N 映射），每个 block 独立一个事件。
+- 同一 wire message 产生的所有 domain 事件共享 `msgId`，最后一个事件 `isLast=true` 并携带 `messageMeta`（model / usage / stopReason）。
+- UI 消费方式：直接 `events.map(renderEvent)` 线性渲染，不处理嵌套。`messageMeta` 用来渲染消息气泡右下角的 token 数 / 模型名。
+- 若下游需要按 message 聚合（比如历史搜索按消息分组），通过 `msgId` group by 即可。
 
+**决策记录**：这个扁平化 vs 保真 API message 的权衡见 `docs/design/notes/issue-3-d6-flatten.md`（待补）。
+
+```typescript
 // packages/stream-parser/src/parser.ts
 class StreamParser {
   private buffer = '';
