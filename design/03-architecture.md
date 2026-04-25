@@ -492,6 +492,32 @@ function checkCompatibility(version: string): CompatStatus {
 }
 ```
 
+#### isLast / messageMeta 语义（2026-04-25 勘误 3，TD-D6）
+
+> **NOTE**：本小节补充上方"扁平化"设计中 `isLast` / `messageMeta` 字段的真实语义。M0 实施时实测 CC 2.1.119 的 wire 行为与初版设计假设有偏差，实际是 **per-wire-event 语义**。完整背景见 `retrospective-m0.md` §三 D6 后续 + §四 勘误 3。
+
+**初版假设**：一个 wire `assistant` event 包含 N 个 content blocks（thinking + text + tool_use 并存），`normalize` 函数 1→N 扁平化，**最后一个 block 的 domain 事件**带 `isLast=true` + `messageMeta`，代表"整条 message 说完"。
+
+**实测情况**：CC 2.1.119 实际是 **每个 content block 一个独立 wire `assistant` event**，所以 `normalize` 函数 1→N 中 N 通常 = 1。每个 wire event 被独立扁平化，**每个 domain 事件都 `isLast=true` 且都带 `messageMeta`**。这使 `isLast` 退化为 "per-wire-event last"，不再具备 "per-message last" 的判别力。
+
+**修订后语义**：
+
+- `isLast=true` 表示"本 wire event 内最后一个 block 的 domain 事件"
+- `messageMeta` 是 **per-wire-event 快照**——`usage` / `stopReason` 反映这个 wire event 截至此刻的 message-level 累计状态，**不**是整条消息的最终值
+- 同 msgId 的下一个 wire event 到达前，本 wire event 的 `isLast` 不可信作"消息说完"的标志
+
+**消费方判断"消息真说完"的三个锚点**（任一即可）：
+
+1. **同 msgId 后跟 `tool_result`**：assistant 这一轮以 tool_use 结尾时，`tool_result` 到达视为该 message 已结束
+2. **`result` 事件到达**：整个 task 结束（携带 `stopReason` / `totalCostUsd` / `durationMs`），最强信号
+3. **新 msgId 的 assistant event**：下一轮 user turn 后 CC 发新 msgId，前一个 msgId 的所有事件视为已结束
+
+完整 Consumer guide（含 TS 代码片段）见 [`packages/stream-parser/README.md`](https://github.com/open-trad/opentrad/blob/main/packages/stream-parser/README.md)。
+
+**Parser 实现保持 stateless**：`StreamParser` / `normalizeWireEvent` 不做"消息真说完"的状态机判断，语义解释推到消费方（UI / SQLite 入库 / 计费等）。
+
+**勘误 3 触发时机**：M1 #1（`opentrad` repo issue #18）开工时复审 D6。
+
 ### 4.3 Skill Runtime（`packages/skill-runtime`）
 
 ```typescript
